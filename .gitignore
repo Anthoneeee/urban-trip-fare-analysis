@@ -1,0 +1,15 @@
+# Python cache
+__pycache__/
+*.pyc
+
+# Matplotlib runtime cache
+.mplconfig/
+
+# Generated analysis outputs
+proposal_outputs_2024/
+
+# Raw monthly parquet files (large)
+yellow_tripdata_2024-*.parquet
+
+# OS/editor
+.DS_Store
