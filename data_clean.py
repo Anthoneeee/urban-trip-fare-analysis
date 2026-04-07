@@ -230,7 +230,7 @@ q1 = clean_integrated_sample(q1)
 # =========================
 # 6. 保存结果
 # =========================
-q1.to_csv("nyc_taxi_2024_sample_90000.csv", index=False)
+q1.to_csv("nyc_taxi_2024_cleaned_sample.csv", index=False)
 
 print("Done.")
 print("Final shape:", q1.shape)
