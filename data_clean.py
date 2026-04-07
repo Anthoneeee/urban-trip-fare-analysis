@@ -1,5 +1,6 @@
 import pandas as pd
 import pyarrow.parquet as pq
+import numpy as np
 
 # =========================
 # 1. 读取 zone lookup
@@ -122,6 +123,81 @@ def clean_and_sample_month(file_path, sample_size=7500, random_state=42):
 
 
 # =========================
+# 2.5 整合后的二次清洗函数
+# =========================
+def clean_integrated_sample(df):
+    """
+    对整合后的全年样本做二次清洗：
+    1) 去重
+    2) 过滤极端异常值
+    3) 处理缺失值和局部异常
+    4) 重算时间衍生特征，确保字段一致
+    """
+    cleaned = df.copy()
+    rows_before = len(cleaned)
+
+    # 去重
+    cleaned = cleaned.drop_duplicates().copy()
+
+    # 过滤极端异常值（按确认阈值放宽上限）
+    cleaned = cleaned[
+        cleaned["trip_distance"].between(0.05, 100) &
+        cleaned["trip_duration_minutes"].between(1, 240) &
+        cleaned["total_amount"].between(1, 400)
+    ].copy()
+
+    # passenger_count：异常值先置空，再填补为 1
+    cleaned.loc[~cleaned["passenger_count"].between(1, 6), "passenger_count"] = np.nan
+    cleaned["passenger_count"] = cleaned["passenger_count"].fillna(1)
+
+    # Airport_fee：缺失或负值统一处理为 0
+    cleaned["Airport_fee"] = cleaned["Airport_fee"].fillna(0)
+    cleaned.loc[cleaned["Airport_fee"] < 0, "Airport_fee"] = 0
+
+    # fare_amount：<=0 先置空，再用距离分箱中位数填补
+    cleaned.loc[cleaned["fare_amount"] <= 0, "fare_amount"] = np.nan
+    distance_bins = pd.cut(
+        cleaned["trip_distance"],
+        bins=[0, 1, 2, 3, 5, 8, 12, 20, 100],
+        include_lowest=True
+    )
+    fare_median_by_bin = cleaned.groupby(distance_bins)["fare_amount"].transform("median")
+    cleaned["fare_amount"] = cleaned["fare_amount"].fillna(fare_median_by_bin)
+    cleaned["fare_amount"] = cleaned["fare_amount"].fillna(cleaned["fare_amount"].median())
+
+    # tip_amount：负值修正为 0
+    cleaned.loc[cleaned["tip_amount"] < 0, "tip_amount"] = 0
+
+    # zone 相关字段缺失统一填 Unknown（不改列名）
+    zone_cols = [
+        "pickup_borough", "pickup_zone", "pickup_service_zone",
+        "dropoff_borough", "dropoff_zone", "dropoff_service_zone"
+    ]
+    for col in zone_cols:
+        cleaned[col] = cleaned[col].fillna("Unknown")
+
+    # 重算时间衍生字段，确保与时间字段一致
+    cleaned["pickup_month"] = cleaned["tpep_pickup_datetime"].dt.month
+    cleaned["pickup_hour"] = cleaned["tpep_pickup_datetime"].dt.hour
+    cleaned["pickup_weekday"] = cleaned["tpep_pickup_datetime"].dt.dayofweek
+    cleaned["is_weekend"] = cleaned["pickup_weekday"] >= 5
+    cleaned["hour_block"] = pd.cut(
+        cleaned["pickup_hour"],
+        bins=[-1, 5, 11, 16, 20, 23],
+        labels=["late_night", "morning", "midday", "evening", "night"]
+    )
+    cleaned["is_airport_trip"] = cleaned["Airport_fee"] > 0
+
+    rows_after = len(cleaned)
+    print("Second cleaning done.")
+    print("Rows before second cleaning:", rows_before)
+    print("Rows after second cleaning :", rows_after)
+    print("Rows removed              :", rows_before - rows_after)
+
+    return cleaned
+
+
+# =========================
 # 3. 分别处理 1-12 月
 # =========================
 jan = clean_and_sample_month("yellow_tripdata_2024-01.parquet", sample_size=7500, random_state=42)
@@ -147,7 +223,12 @@ q1 = q1.merge(pickup_lookup, on="PULocationID", how="left")
 q1 = q1.merge(dropoff_lookup, on="DOLocationID", how="left")
 
 # =========================
-# 5. 保存结果
+# 5. 整合样本二次清洗
+# =========================
+q1 = clean_integrated_sample(q1)
+
+# =========================
+# 6. 保存结果
 # =========================
 q1.to_csv("nyc_taxi_2024_sample_90000.csv", index=False)
 
