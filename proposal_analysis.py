@@ -41,7 +41,7 @@ from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
 # 0. 路径设置
 # =========================
 # 把这里改成你自己的 CSV 路径
-DATA_PATH = "nyc_taxi_2024_sample_90000.csv"
+DATA_PATH = "nyc_taxi_2024_cleaned_sample.csv"
 
 # 输出文件夹：图和结果会保存在这里
 OUTPUT_DIR = Path("proposal_outputs_2024")
