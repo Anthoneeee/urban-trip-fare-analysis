@@ -10,7 +10,11 @@ import pandas as pd
 # =========================
 DATA_PATH = Path("nyc_taxi_2024_cleaned_sample.csv")
 OUTPUT_DIR = Path("proposal_outputs_2024")
+# 保留旧文件名（兼容你当前 LaTeX 引用），但内容改为单图输出
 OUTPUT_IMG = OUTPUT_DIR / "fig_13_5am_price_diagnosis.png"
+OUTPUT_IMG_DIST = OUTPUT_DIR / "fig_13_5am_distance_mix.png"
+OUTPUT_IMG_DECOMP = OUTPUT_DIR / "fig_13_5am_decomposition.png"
+OUTPUT_IMG_RATIO = OUTPUT_DIR / "fig_13_5am_key_ratio.png"
 OUTPUT_SUMMARY_CSV = OUTPUT_DIR / "hour5_diagnosis_summary.csv"
 OUTPUT_DECOMP_CSV = OUTPUT_DIR / "hour5_decomposition.csv"
 
@@ -111,10 +115,23 @@ def compute_metrics(df: pd.DataFrame) -> dict:
         }
     )
 
+    # 小时维度轮廓：用于画“5点为何突出”的常规折线图
+    hour_profile_df = (
+        df.groupby("pickup_hour", as_index=False)
+        .agg(
+            mean_total_amount=("total_amount", "mean"),
+            median_total_amount=("total_amount", "median"),
+            mean_trip_distance=("trip_distance", "mean"),
+            airport_share=("is_airport_trip", "mean"),
+        )
+        .sort_values("pickup_hour")
+    )
+
     return {
         "summary_df": summary_df,
         "decomp_df": decomp_df,
         "dist_compare_df": dist_compare_df,
+        "hour_profile_df": hour_profile_df,
         "delta_total": delta_total,
         "m5": m5,
         "m0": m0,
@@ -122,7 +139,7 @@ def compute_metrics(df: pd.DataFrame) -> dict:
 
 
 # =========================
-# 4. 可视化：分析过程+代码+结果合并为一图
+# 4. 可视化：拆分为常规单图输出
 # =========================
 def draw_report(metrics: dict) -> None:
     plt.rcParams["font.sans-serif"] = ["Arial", "DejaVu Sans"]
@@ -131,100 +148,84 @@ def draw_report(metrics: dict) -> None:
     summary_df = metrics["summary_df"]
     decomp_df = metrics["decomp_df"]
     dist_df = metrics["dist_compare_df"]
+    hour_profile_df = metrics["hour_profile_df"]
     delta_total = metrics["delta_total"]
     m5 = metrics["m5"]
     m0 = metrics["m0"]
 
-    fig = plt.figure(figsize=(18, 10), dpi=180, constrained_layout=True)
-    grid = fig.add_gridspec(2, 2, wspace=0.25, hspace=0.25)
-
-    # 左上：分析过程 + 核心代码
-    ax_text = fig.add_subplot(grid[0, 0])
-    ax_text.axis("off")
-    text = (
-        "5AM fare diagnosis workflow\n"
-        "1) Load nyc_taxi_2024_cleaned_sample.csv\n"
-        "2) Compare 5AM vs ALL hours (price/distance/duration/airport share)\n"
-        "3) Compute long-trip share (>=10mi, >=20mi)\n"
-        "4) Decompose 5AM mean-fare uplift into:\n"
-        "   - airport share change\n"
-        "   - non-airport price structure change\n"
-        "   - airport price change\n"
-        "5) Export one summary figure + CSV tables\n\n"
-        "Core code snippet:\n"
-        "h5 = df[df['pickup_hour'] == 5]\n"
-        "airport_share = h5['is_airport_trip'].mean()\n"
-        "long_trip_share = (h5['trip_distance'] >= 10).mean()\n"
-        "delta_total = h5['total_amount'].mean() - df['total_amount'].mean()\n"
+    # 图1：小时均价/中位数走势 + 5点高亮（保留旧文件名）
+    plt.figure(figsize=(9, 5))
+    plt.plot(hour_profile_df["pickup_hour"], hour_profile_df["mean_total_amount"], marker="o", label="hourly mean")
+    plt.plot(hour_profile_df["pickup_hour"], hour_profile_df["median_total_amount"], marker="s", label="hourly median")
+    plt.scatter([5], [m5], color="red", s=90, zorder=5, label="5AM mean")
+    plt.annotate(
+        f"5AM={m5:.2f}\nALL={m0:.2f}\nDelta={delta_total:.2f}",
+        xy=(5, m5),
+        xytext=(7.2, m5 + 2.5),
+        arrowprops=dict(arrowstyle="->", lw=1),
+        fontsize=9
     )
-    ax_text.text(
-        0.0,
-        1.0,
-        text,
-        va="top",
-        ha="left",
-        fontsize=10,
-        family="monospace",
-        linespacing=1.45,
-    )
+    plt.xlabel("pickup_hour")
+    plt.ylabel("total_amount")
+    plt.title("Hourly fare profile with 5AM highlight")
+    plt.xticks(range(0, 24))
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(OUTPUT_IMG, dpi=180)
+    plt.close()
 
-    # 右上：关键指标表
-    ax_table = fig.add_subplot(grid[0, 1])
-    ax_table.axis("off")
-    table_df = summary_df.copy()
-    table_df["hour5"] = table_df["hour5"].round(4)
-    table_df["all_hours"] = table_df["all_hours"].round(4)
-    table_df["ratio_hour5_vs_all"] = table_df["ratio_hour5_vs_all"].round(3)
-    table = ax_table.table(
-        cellText=table_df.values,
-        colLabels=["metric", "hour5", "all_hours", "ratio"],
-        loc="center",
-        cellLoc="center",
-        colLoc="center",
-    )
-    table.auto_set_font_size(False)
-    table.set_fontsize(9)
-    table.scale(1.1, 1.4)
-    ax_table.set_title("5AM vs ALL: key metric comparison", fontsize=12, pad=8)
-
-    # 左下：距离结构对比
-    ax_dist = fig.add_subplot(grid[1, 0])
+    # 图2：距离分段结构对比
     x = np.arange(len(dist_df))
     width = 0.36
-    ax_dist.bar(x - width / 2, dist_df["hour5_share"], width=width, label="5AM")
-    ax_dist.bar(x + width / 2, dist_df["all_hours_share"], width=width, label="ALL")
-    ax_dist.set_xticks(x)
-    ax_dist.set_xticklabels(dist_df["distance_bin"])
-    ax_dist.set_ylabel("share")
-    ax_dist.set_title("Distance-band mix: 5AM vs ALL")
-    ax_dist.legend()
+    plt.figure(figsize=(8, 5))
+    plt.bar(x - width / 2, dist_df["hour5_share"], width=width, label="5AM")
+    plt.bar(x + width / 2, dist_df["all_hours_share"], width=width, label="ALL")
+    plt.xticks(x, dist_df["distance_bin"])
+    plt.ylabel("share")
+    plt.xlabel("distance bin (mile)")
+    plt.title("Distance-band mix: 5AM vs ALL")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(OUTPUT_IMG_DIST, dpi=180)
+    plt.close()
 
-    # 右下：均价提升分解
-    ax_dec = fig.add_subplot(grid[1, 1])
+    # 图3：5点均价提升分解
     comp = decomp_df[decomp_df["component"] != "total_delta_5am_minus_all"].copy()
-    ax_dec.bar(
+    plt.figure(figsize=(8, 5))
+    plt.bar(
         comp["component"],
         comp["value"],
         color=["#4C78A8", "#F58518", "#54A24B"],
     )
-    ax_dec.axhline(0, color="black", linewidth=0.8)
-    ax_dec.set_ylabel("USD contribution")
-    ax_dec.set_title("Decomposition of 5AM mean-fare uplift")
-    ax_dec.tick_params(axis="x", rotation=20)
+    plt.axhline(0, color="black", linewidth=0.8)
+    plt.ylabel("USD contribution")
+    plt.title("Decomposition of 5AM mean-fare uplift")
+    plt.xticks(rotation=20, ha="right")
+    plt.tight_layout()
+    plt.savefig(OUTPUT_IMG_DECOMP, dpi=180)
+    plt.close()
 
-    # 总标题 + 结论
-    fig.suptitle(
-        (
-            "Why is 5AM average fare high?\n"
-            f"5AM mean={m5:.2f}, ALL mean={m0:.2f}, delta={delta_total:.2f} | "
-            "Main driver: longer-trip mix, not pure time surcharge."
-        ),
-        fontsize=13,
-        y=0.98,
-    )
-
-    fig.savefig(OUTPUT_IMG, dpi=180)
-    plt.close(fig)
+    # 图4：关键指标比值（5AM / ALL）
+    keep_metrics = [
+        "mean_total_amount",
+        "median_total_amount",
+        "mean_trip_distance",
+        "airport_share",
+        "share_trip_distance_ge_10",
+        "share_trip_distance_ge_20",
+        "mean_amount_per_mile",
+    ]
+    ratio_df = summary_df[summary_df["metric"].isin(keep_metrics)].copy()
+    ratio_df = ratio_df.sort_values("ratio_hour5_vs_all", ascending=False)
+    plt.figure(figsize=(9, 5))
+    plt.bar(ratio_df["metric"], ratio_df["ratio_hour5_vs_all"], color="#4C78A8")
+    plt.axhline(1.0, color="gray", linestyle="--", linewidth=1)
+    plt.ylabel("ratio (5AM / ALL)")
+    plt.title("Key metric ratio: 5AM vs ALL")
+    plt.xticks(rotation=30, ha="right")
+    plt.tight_layout()
+    plt.savefig(OUTPUT_IMG_RATIO, dpi=180)
+    plt.close()
 
 
 # =========================
@@ -242,6 +243,9 @@ def main() -> None:
 
     print("Saved:")
     print("-", OUTPUT_IMG)
+    print("-", OUTPUT_IMG_DIST)
+    print("-", OUTPUT_IMG_DECOMP)
+    print("-", OUTPUT_IMG_RATIO)
     print("-", OUTPUT_SUMMARY_CSV)
     print("-", OUTPUT_DECOMP_CSV)
 
