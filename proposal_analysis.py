@@ -16,8 +16,10 @@ from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score, median_absolute_error
+from sklearn.model_selection import GridSearchCV, TimeSeriesSplit
 from sklearn.linear_model import LinearRegression
+from sklearn.linear_model import Ridge, Lasso, ElasticNet
 from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
 
 
@@ -46,6 +48,70 @@ DATA_PATH = "nyc_taxi_2024_cleaned_sample.csv"
 # 输出文件夹：图和结果会保存在这里
 OUTPUT_DIR = Path("proposal_outputs_2024")
 OUTPUT_DIR.mkdir(exist_ok=True)
+
+
+# =========================
+# 0.5 Bootstrap 工具函数
+# =========================
+def bootstrap_mean_diff_ci(values_a, values_b, n_boot=3000, random_state=42):
+    """
+    对两组均值差（a - b）做 bootstrap，返回 95% CI。
+    """
+    values_a = np.asarray(values_a)
+    values_b = np.asarray(values_b)
+
+    n_a = len(values_a)
+    n_b = len(values_b)
+    rng = np.random.default_rng(random_state)
+    boot_diffs = np.empty(n_boot)
+
+    for i in range(n_boot):
+        sample_a = values_a[rng.integers(0, n_a, n_a)]
+        sample_b = values_b[rng.integers(0, n_b, n_b)]
+        boot_diffs[i] = sample_a.mean() - sample_b.mean()
+
+    return {
+        "bootstrap_mean": float(boot_diffs.mean()),
+        "bootstrap_std": float(boot_diffs.std(ddof=1)),
+        "ci_lower_95": float(np.quantile(boot_diffs, 0.025)),
+        "ci_upper_95": float(np.quantile(boot_diffs, 0.975)),
+    }
+
+
+def bootstrap_prediction_metrics_ci(y_true, y_pred, n_boot=2000, random_state=42):
+    """
+    对预测指标（RMSE/MAE/R2）做 bootstrap，返回 95% CI。
+    """
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+    n = len(y_true)
+    rng = np.random.default_rng(random_state)
+
+    rmse_boot = np.empty(n_boot)
+    mae_boot = np.empty(n_boot)
+    r2_boot = np.empty(n_boot)
+
+    for i in range(n_boot):
+        idx = rng.integers(0, n, n)
+        yt = y_true[idx]
+        yp = y_pred[idx]
+        rmse_boot[i] = np.sqrt(mean_squared_error(yt, yp))
+        mae_boot[i] = mean_absolute_error(yt, yp)
+        r2_boot[i] = r2_score(yt, yp)
+
+    def _pack(arr):
+        return {
+            "bootstrap_mean": float(arr.mean()),
+            "bootstrap_std": float(arr.std(ddof=1)),
+            "ci_lower_95": float(np.quantile(arr, 0.025)),
+            "ci_upper_95": float(np.quantile(arr, 0.975)),
+        }
+
+    return {
+        "RMSE": _pack(rmse_boot),
+        "MAE": _pack(mae_boot),
+        "R2": _pack(r2_boot),
+    }
 
 
 # =========================
@@ -389,10 +455,10 @@ hypothesis_df.to_csv(OUTPUT_DIR / "hypothesis_test_results.csv", index=False)
 
 
 # =========================
-# 14. 基础建模：预测 total_amount
+# 14. 模型对比 + 正则化 + 网格调参
 # =========================
 print("\n" + "=" * 60)
-print("14. Baseline modeling: predict total_amount")
+print("14. Modeling with regularization and full parameter grids")
 print("=" * 60)
 
 target = "total_amount"
@@ -411,7 +477,16 @@ features = [
     "dropoff_borough"
 ]
 
+# 先按时间排序，再做时间切分，避免信息泄漏
 model_df = df[features + [target, "tpep_pickup_datetime"]].copy()
+model_df = model_df.sort_values("tpep_pickup_datetime").reset_index(drop=True)
+
+X = model_df[features]
+y = model_df[target]
+
+split_idx = int(len(model_df) * 0.8)
+X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
+y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
 
 numeric_features = [
     "trip_distance",
@@ -447,53 +522,234 @@ preprocessor = ColumnTransformer(
     ]
 )
 
-model_df = model_df.sort_values("tpep_pickup_datetime").reset_index(drop=True)
-X = model_df[features]
-y = model_df[target]
+# 训练集内部时间序列交叉验证（稳定版：3 折）
+tscv = TimeSeriesSplit(n_splits=3)
 
-split_idx = int(len(model_df) * 0.8)
-X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
-y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
-
-models = {
-    "Linear Regression": LinearRegression(),
-    "Random Forest": RandomForestRegressor(
-        n_estimators=100,
-        random_state=42,
-        n_jobs=-1
-    ),
-    "Gradient Boosting": GradientBoostingRegressor(random_state=42)
-}
+# 每个模型都提供参数网格
+model_configs = [
+    {
+        "name": "Linear Regression",
+        "estimator": LinearRegression(),
+        "param_grid": {
+            "model__fit_intercept": [True, False]
+        }
+    },
+    {
+        "name": "Ridge",
+        "estimator": Ridge(),
+        "param_grid": {
+            "model__alpha": [0.01, 0.1, 1.0, 10.0, 50.0, 100.0]
+        }
+    },
+    {
+        "name": "Lasso",
+        "estimator": Lasso(random_state=42, max_iter=10000),
+        "param_grid": {
+            "model__alpha": [0.0005, 0.001, 0.005, 0.01, 0.05]
+        }
+    },
+    {
+        "name": "ElasticNet",
+        "estimator": ElasticNet(random_state=42, max_iter=10000),
+        "param_grid": {
+            "model__alpha": [0.0005, 0.001, 0.005, 0.01, 0.05],
+            "model__l1_ratio": [0.2, 0.5, 0.8]
+        }
+    },
+    {
+        "name": "Random Forest",
+        "estimator": RandomForestRegressor(random_state=42, n_jobs=1),
+        "param_grid": {
+            "model__n_estimators": [200, 350],
+            "model__max_depth": [None, 12, 20],
+            "model__min_samples_split": [2, 5],
+            "model__min_samples_leaf": [1, 2],
+            "model__max_features": ["sqrt"]
+        }
+    },
+    {
+        "name": "Gradient Boosting",
+        "estimator": GradientBoostingRegressor(random_state=42),
+        "param_grid": {
+            "model__n_estimators": [200],
+            "model__learning_rate": [0.05, 0.1],
+            "model__max_depth": [2, 3, 4],
+            "model__min_samples_split": [2],
+            "model__min_samples_leaf": [1, 3],
+            "model__subsample": [0.8, 1.0]
+        }
+    }
+]
 
 results = []
+test_pred_cache = {}
 
-for name, model in models.items():
-    clf = Pipeline(steps=[
+for cfg in model_configs:
+    print("\n" + "-" * 60)
+    print(f"Training: {cfg['name']}")
+    print("-" * 60)
+
+    pipeline = Pipeline(steps=[
         ("preprocessor", preprocessor),
-        ("model", model)
+        ("model", cfg["estimator"])
     ])
 
-    clf.fit(X_train, y_train)
-    preds = clf.predict(X_test)
+    search = GridSearchCV(
+        estimator=pipeline,
+        param_grid=cfg["param_grid"],
+        scoring="neg_root_mean_squared_error",
+        cv=tscv,
+        n_jobs=1,
+        verbose=1
+    )
 
+    # 只在训练集上调参
+    search.fit(X_train, y_train)
+
+    best_model = search.best_estimator_
+    preds = best_model.predict(X_test)
+    test_pred_cache[cfg["name"]] = np.asarray(preds)
+
+    cv_rmse = -search.best_score_
     rmse = np.sqrt(mean_squared_error(y_test, preds))
     mae = mean_absolute_error(y_test, preds)
+    medae = median_absolute_error(y_test, preds)
     r2 = r2_score(y_test, preds)
 
-    print(f"\n{name}")
-    print("RMSE =", round(rmse, 4))
-    print("MAE  =", round(mae, 4))
-    print("R2   =", round(r2, 4))
+    print("Best params:", search.best_params_)
+    print("CV RMSE    =", round(cv_rmse, 4))
+    print("Test RMSE  =", round(rmse, 4))
+    print("Test MAE   =", round(mae, 4))
+    print("Test MedAE =", round(medae, 4))
+    print("Test R2    =", round(r2, 4))
 
     results.append({
-        "model": name,
+        "model": cfg["name"],
+        "best_params": str(search.best_params_),
+        "CV_RMSE": cv_rmse,
         "RMSE": rmse,
         "MAE": mae,
+        "MedAE": medae,
         "R2": r2
     })
 
-results_df = pd.DataFrame(results)
-results_df.to_csv(OUTPUT_DIR / "model_results.csv", index=False)
+results_df = pd.DataFrame(results).sort_values("R2", ascending=False)
+results_df.to_csv(OUTPUT_DIR / "model_results_detailed.csv", index=False)
+
+# 保留原有汇总表格式，兼容之前输出
+results_df[["model", "RMSE", "MAE", "R2"]].to_csv(
+    OUTPUT_DIR / "model_results.csv", index=False
+)
+
+
+# =========================
+# 14.5 Bootstrap：差值区间 + 指标区间
+# =========================
+print("\n" + "=" * 60)
+print("14.5 Bootstrapping for uncertainty intervals")
+print("=" * 60)
+
+N_BOOT_DIFF = 3000
+N_BOOT_METRIC = 2000
+
+# 对假设检验中的均值差做 bootstrap CI
+airport_true_vals = df.loc[df["is_airport_trip"] == True, "total_amount"].to_numpy()
+airport_false_vals = df.loc[df["is_airport_trip"] == False, "total_amount"].to_numpy()
+airport_ci = bootstrap_mean_diff_ci(
+    airport_true_vals,
+    airport_false_vals,
+    n_boot=N_BOOT_DIFF,
+    random_state=42
+)
+
+weekend_true_vals = df.loc[df["is_weekend"] == True, "total_amount"].to_numpy()
+weekend_false_vals = df.loc[df["is_weekend"] == False, "total_amount"].to_numpy()
+weekend_ci = bootstrap_mean_diff_ci(
+    weekend_true_vals,
+    weekend_false_vals,
+    n_boot=N_BOOT_DIFF,
+    random_state=42
+)
+
+bootstrap_hypothesis_df = pd.DataFrame([
+    {
+        "test": "airport_vs_nonairport",
+        "observed_difference": observed_diff_airport,
+        "bootstrap_mean": airport_ci["bootstrap_mean"],
+        "bootstrap_std": airport_ci["bootstrap_std"],
+        "ci_lower_95": airport_ci["ci_lower_95"],
+        "ci_upper_95": airport_ci["ci_upper_95"],
+        "n_boot": N_BOOT_DIFF,
+    },
+    {
+        "test": "weekend_vs_weekday",
+        "observed_difference": observed_diff_weekend,
+        "bootstrap_mean": weekend_ci["bootstrap_mean"],
+        "bootstrap_std": weekend_ci["bootstrap_std"],
+        "ci_lower_95": weekend_ci["ci_lower_95"],
+        "ci_upper_95": weekend_ci["ci_upper_95"],
+        "n_boot": N_BOOT_DIFF,
+    },
+])
+
+bootstrap_hypothesis_df.to_csv(OUTPUT_DIR / "bootstrap_hypothesis_ci.csv", index=False)
+print("\nBootstrap CI for hypothesis differences:")
+print(bootstrap_hypothesis_df)
+
+# 对每个模型测试集指标做 bootstrap CI
+y_test_np = y_test.to_numpy()
+point_metrics = results_df.set_index("model")[["RMSE", "MAE", "R2"]]
+
+metric_rows = []
+for model_name, y_pred in test_pred_cache.items():
+    metric_ci = bootstrap_prediction_metrics_ci(
+        y_test_np,
+        y_pred,
+        n_boot=N_BOOT_METRIC,
+        random_state=42
+    )
+
+    for metric_name in ["RMSE", "MAE", "R2"]:
+        metric_rows.append({
+            "model": model_name,
+            "metric": metric_name,
+            "point_estimate": float(point_metrics.loc[model_name, metric_name]),
+            "bootstrap_mean": metric_ci[metric_name]["bootstrap_mean"],
+            "bootstrap_std": metric_ci[metric_name]["bootstrap_std"],
+            "ci_lower_95": metric_ci[metric_name]["ci_lower_95"],
+            "ci_upper_95": metric_ci[metric_name]["ci_upper_95"],
+            "n_boot": N_BOOT_METRIC,
+        })
+
+bootstrap_metric_df = pd.DataFrame(metric_rows)
+bootstrap_metric_df.to_csv(OUTPUT_DIR / "bootstrap_model_metric_ci.csv", index=False)
+
+print("\nBootstrap CI for model metrics (head):")
+print(bootstrap_metric_df.head(12))
+
+# 画图：假设差值点估计 + bootstrap 95% CI
+plt.figure(figsize=(7, 4))
+x_labels = bootstrap_hypothesis_df["test"].tolist()
+x = np.arange(len(x_labels))
+point = bootstrap_hypothesis_df["observed_difference"].to_numpy()
+lower_err = point - bootstrap_hypothesis_df["ci_lower_95"].to_numpy()
+upper_err = bootstrap_hypothesis_df["ci_upper_95"].to_numpy() - point
+
+plt.errorbar(
+    x,
+    point,
+    yerr=[lower_err, upper_err],
+    fmt="o",
+    capsize=6,
+    linewidth=1.6
+)
+plt.axhline(0, color="gray", linestyle="--", linewidth=1)
+plt.xticks(x, x_labels, rotation=15, ha="right")
+plt.ylabel("difference in mean total_amount")
+plt.title("Bootstrap 95% CI for hypothesis differences")
+plt.tight_layout()
+plt.savefig(OUTPUT_DIR / "fig_13_bootstrap_hypothesis_ci.png", dpi=180)
+plt.close()
 
 
 # =========================
@@ -642,6 +898,43 @@ airport_controlled_df = pd.DataFrame({
 airport_controlled_df.to_csv(OUTPUT_DIR / "airport_controlled_effect.csv", index=False)
 
 print("Controlled airport premium (coef):", round(airport_controlled_coef, 4))
+
+# =========================
+# 16.5 Bootstrap：控制后机场溢价区间
+# =========================
+N_BOOT_CONTROL = 400
+airport_feature_name = "is_airport_trip_True"
+
+if airport_feature_name in all_feature_names:
+    X_control_matrix = control_model.named_steps["preprocessor"].transform(df[control_features])
+    y_control = df["total_amount"].to_numpy()
+    airport_idx = all_feature_names.index(airport_feature_name)
+
+    rng_control = np.random.default_rng(42)
+    n_control = len(y_control)
+    boot_coef = np.empty(N_BOOT_CONTROL)
+
+    for i in range(N_BOOT_CONTROL):
+        idx = rng_control.integers(0, n_control, n_control)
+        lr = LinearRegression()
+        lr.fit(X_control_matrix[idx], y_control[idx])
+        boot_coef[i] = lr.coef_[airport_idx]
+
+    bootstrap_control_df = pd.DataFrame([{
+        "metric": "airport_premium_controlled_bootstrap",
+        "point_estimate": float(airport_controlled_coef),
+        "bootstrap_mean": float(boot_coef.mean()),
+        "bootstrap_std": float(boot_coef.std(ddof=1)),
+        "ci_lower_95": float(np.quantile(boot_coef, 0.025)),
+        "ci_upper_95": float(np.quantile(boot_coef, 0.975)),
+        "n_boot": N_BOOT_CONTROL,
+    }])
+
+    bootstrap_control_df.to_csv(OUTPUT_DIR / "bootstrap_controlled_airport_ci.csv", index=False)
+    print("\nBootstrap CI for controlled airport premium:")
+    print(bootstrap_control_df)
+else:
+    print("\nWarning: is_airport_trip_True not found, skip controlled bootstrap.")
 
 # 画图：距离分段后机场与非机场均价对比
 pivot_airport = airport_by_dist.pivot(
