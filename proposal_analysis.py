@@ -6,52 +6,84 @@ import numpy as np
 import matplotlib
 
 # 使用无界面后端，避免 PyCharm 交互后端兼容性问题。
+# Use a non-interactive backend to avoid compatibility issues with the PyCharm interactive backend.
 MPL_CONFIG_DIR = Path(".mplconfig")
 MPL_CONFIG_DIR.mkdir(exist_ok=True)
 os.environ.setdefault("MPLCONFIGDIR", str(MPL_CONFIG_DIR.resolve()))
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from sklearn.compose import ColumnTransformer
-from sklearn.pipeline import Pipeline
-from sklearn.impute import SimpleImputer
-from sklearn.preprocessing import OneHotEncoder
-from sklearn.linear_model import LinearRegression
-
 
 # ============================================================
 # Proposal Analysis Script for NYC Taxi 2024 Full-Year Sample
 # ------------------------------------------------------------
 # 这个脚本做的事情：
+# What this script does:
 # 1. 读取你已经做好的 2024 全年样本集 CSV
+# 1. Read your prepared 2024 full-year sample CSV
 # 2. 查看数据结构、数据类型、缺失值、描述统计
+# 2. Inspect data structure, data types, missing values, and descriptive statistics
 # 3. 生成 proposal 阶段最关键的 EDA 图
+# 3. Generate the most important EDA plots for the proposal stage
 # 4. 做两个简单的 permutation test（假设检验）
+# 4. Run two simple permutation tests (hypothesis tests)
 # 5. 读取独立模型脚本输出的建模结果（不在此脚本重复训练）
+# 5. Load modeling results produced by the separate model script (no retraining here)
 # 6. 把图和部分结果保存到本地文件夹
-#
-# 你只需要改一个地方：
-# DATA_PATH = "你的 CSV 文件路径"
+# 6. Save figures and selected results to a local folder
 # ============================================================
 
 
 # =========================
 # 0. 路径设置
+# 0. Path setup
 # =========================
-# 把这里改成你自己的 CSV 路径
 DATA_PATH = "nyc_taxi_2024_cleaned_sample.csv"
 
 # 输出文件夹：图和结果会保存在这里
+# Output folder: figures and results will be saved here.
 OUTPUT_DIR = Path("proposal_outputs_2024")
 OUTPUT_DIR.mkdir(exist_ok=True)
+
+# 清理已弃用的 EDA 输出，避免旧文件干扰最终提交。
+# Remove deprecated EDA outputs so stale files do not confuse final deliverables.
+DEPRECATED_EDA_FILES = [
+    "fig_1_total_amount_distribution.png",
+    "fig_3_duration_vs_total_amount.png",
+    "fig_5_borough_avg_total_amount.png",
+    "fig_7_weekday_vs_weekend.png",
+    "borough_avg_total_amount.csv",
+    "weekend_avg_total_amount.csv",
+    "hypothesis_test_controlled_results.csv",
+    "fig_14_controlled_hypothesis_permutation.png",
+    "fig_8_hourly_cost_efficiency.png",
+    "fig_9_airport_gap_by_distance_band.png",
+    "fig_10_hourly_price_risk_quantiles.png",
+    "fig_11_top_routes_mean_total_amount.png",
+    "fig_12_monthly_decomposition.png",
+    "hour_efficiency_summary.csv",
+    "airport_by_distance_band.csv",
+    "airport_controlled_effect.csv",
+    "bootstrap_controlled_airport_ci.csv",
+    "hourly_risk_quantiles.csv",
+    "route_structure_summary.csv",
+    "monthly_decomposition.csv",
+    "monthly_weekend_gap.csv",
+]
+for filename in DEPRECATED_EDA_FILES:
+    stale_path = OUTPUT_DIR / filename
+    if stale_path.exists():
+        stale_path.unlink()
 
 
 # =========================
 # 0.5 Bootstrap 工具函数
+# 0.5 Bootstrap utility function
 # =========================
 def bootstrap_mean_diff_ci(values_a, values_b, n_boot=3000, random_state=42):
     """
     对两组均值差（a - b）做 bootstrap，返回 95% CI。
+    Run bootstrap for the mean difference (a - b) and return a 95% confidence interval.
     """
     values_a = np.asarray(values_a)
     values_b = np.asarray(values_b)
@@ -74,8 +106,36 @@ def bootstrap_mean_diff_ci(values_a, values_b, n_boot=3000, random_state=42):
     }
 
 
+def summarize_iqr_outliers(df, cols):
+    """
+    使用 IQR 规则对关键数值变量做异常值诊断。
+    Diagnose outliers for key numeric variables using the IQR rule.
+    """
+    rows = []
+    for col in cols:
+        s = df[col].dropna()
+        q1 = float(s.quantile(0.25))
+        q3 = float(s.quantile(0.75))
+        iqr = q3 - q1
+        lower = q1 - 1.5 * iqr
+        upper = q3 + 1.5 * iqr
+        outlier_mask = (s < lower) | (s > upper)
+        rows.append({
+            "column": col,
+            "q1": q1,
+            "q3": q3,
+            "iqr": iqr,
+            "lower_bound": lower,
+            "upper_bound": upper,
+            "outlier_count": int(outlier_mask.sum()),
+            "outlier_pct": float((outlier_mask.mean() * 100.0)),
+        })
+    return pd.DataFrame(rows)
+
+
 # =========================
 # 1. 读取数据
+# 1. Load data
 # =========================
 print("=" * 60)
 print("1. Reading data...")
@@ -96,6 +156,7 @@ print(df.head())
 
 # =========================
 # 2. 数据整体情况
+# 2. Overall data profile
 # =========================
 print("\n" + "=" * 60)
 print("2. Data overview and quality check")
@@ -111,6 +172,7 @@ print("\nMissing values percentage:")
 print((df.isna().mean() * 100).round(2))
 
 # 保存缺失值信息
+# Save missing-value summary.
 missing_df = pd.DataFrame({
     "missing_count": df.isna().sum(),
     "missing_pct": (df.isna().mean() * 100).round(2)
@@ -118,20 +180,24 @@ missing_df = pd.DataFrame({
 missing_df.to_csv(OUTPUT_DIR / "missing_summary.csv", index=False)
 
 # 查看月份分布
+# Check month distribution.
 print("\nPickup month distribution:")
 print(df["pickup_month"].value_counts().sort_index())
 
 # 查看周末/工作日比例
+# Check weekend/weekday proportion.
 print("\nis_weekend distribution:")
 print(df["is_weekend"].value_counts(dropna=False))
 
 # 查看时间段分布
+# Check time-block distribution.
 print("\nhour_block distribution:")
 print(df["hour_block"].value_counts(dropna=False))
 
 
 # =========================
 # 3. 数值变量描述统计
+# 3. Descriptive statistics for numeric variables
 # =========================
 print("\n" + "=" * 60)
 print("3. Descriptive statistics")
@@ -154,29 +220,29 @@ desc.to_csv(OUTPUT_DIR / "numeric_describe.csv")
 
 
 # =========================
-# 4. 图 1：total_amount 分布
+# 3.5 异常值诊断（IQR）
+# 3.5 Outlier diagnostics (IQR)
 # =========================
 print("\n" + "=" * 60)
-print("4. Plotting: Distribution of total_amount")
+print("3.5 Outlier diagnostics by IQR")
 print("=" * 60)
 
-plt.figure(figsize=(8, 5))
-plt.hist(df["total_amount"], bins=60)
-plt.xlabel("total_amount")
-plt.ylabel("count")
-plt.title("Distribution of total_amount")
-plt.tight_layout()
-plt.savefig(OUTPUT_DIR / "fig_1_total_amount_distribution.png", dpi=180)
-plt.close()
+outlier_cols = ["trip_distance", "trip_duration_minutes", "total_amount"]
+outlier_df = summarize_iqr_outliers(df, outlier_cols)
+print(outlier_df)
+outlier_df.to_csv(OUTPUT_DIR / "outlier_iqr_summary.csv", index=False)
 
 
 # =========================
-# 5. 图 2：trip_distance vs total_amount
+# 4. 聚焦 EDA（只保留 3 张主线图）
+# 4. Focused EDA (keep only 3 core plots for model storyline)
 # =========================
 print("\n" + "=" * 60)
-print("5. Plotting: trip_distance vs total_amount")
+print("4. Focused EDA: keep three model-aligned figures only")
 print("=" * 60)
 
+# 图 A：trip_distance vs total_amount（对应模型中的 trip_distance）
+# Figure A: trip_distance vs total_amount (aligned with model feature trip_distance).
 plot_df = df.sample(min(5000, len(df)), random_state=42)
 
 plt.figure(figsize=(8, 5))
@@ -188,41 +254,15 @@ plt.tight_layout()
 plt.savefig(OUTPUT_DIR / "fig_2_distance_vs_total_amount.png", dpi=180)
 plt.close()
 
-
-# =========================
-# 6. 图 3：trip_duration_minutes vs total_amount
-# =========================
-print("\n" + "=" * 60)
-print("6. Plotting: trip_duration_minutes vs total_amount")
-print("=" * 60)
-
-plot_df = df.sample(min(5000, len(df)), random_state=42)
-
-plt.figure(figsize=(8, 5))
-plt.scatter(plot_df["trip_duration_minutes"], plot_df["total_amount"], s=8, alpha=0.35)
-plt.xlabel("trip_duration_minutes")
-plt.ylabel("total_amount")
-plt.title("trip_duration_minutes vs total_amount")
-plt.tight_layout()
-plt.savefig(OUTPUT_DIR / "fig_3_duration_vs_total_amount.png", dpi=180)
-plt.close()
-
-
-# =========================
-# 7. 图 4：按小时平均 total_amount
-# =========================
-print("\n" + "=" * 60)
-print("7. Plotting: average total_amount by pickup_hour")
-print("=" * 60)
-
+# 图 B：按小时平均 total_amount（保留老师认可的主图）
+# Figure B: average total_amount by hour (the figure specifically recommended by feedback).
 hour_avg = (
     df.groupby("pickup_hour", as_index=False)["total_amount"]
       .mean()
       .sort_values("pickup_hour")
 )
-
+print("\nHourly mean total_amount:")
 print(hour_avg)
-
 hour_avg.to_csv(OUTPUT_DIR / "hour_avg_total_amount.csv", index=False)
 
 plt.figure(figsize=(8, 5))
@@ -235,45 +275,8 @@ plt.tight_layout()
 plt.savefig(OUTPUT_DIR / "fig_4_hourly_avg_total_amount.png", dpi=180)
 plt.close()
 
-
-# =========================
-# 8. 图 5：按 borough 平均 total_amount
-# =========================
-print("\n" + "=" * 60)
-print("8. Plotting: average total_amount by pickup_borough")
-print("=" * 60)
-
-borough_avg = (
-    df.groupby("pickup_borough", as_index=False)
-      .agg(
-          mean_total_amount=("total_amount", "mean"),
-          trip_count=("total_amount", "size")
-      )
-      .sort_values("mean_total_amount", ascending=False)
-)
-
-print(borough_avg)
-
-borough_avg.to_csv(OUTPUT_DIR / "borough_avg_total_amount.csv", index=False)
-
-plt.figure(figsize=(8, 5))
-plt.bar(borough_avg["pickup_borough"].astype(str), borough_avg["mean_total_amount"])
-plt.xlabel("pickup_borough")
-plt.ylabel("mean total_amount")
-plt.title("Average total_amount by pickup_borough")
-plt.xticks(rotation=45, ha="right")
-plt.tight_layout()
-plt.savefig(OUTPUT_DIR / "fig_5_borough_avg_total_amount.png", dpi=180)
-plt.close()
-
-
-# =========================
-# 9. 图 6：机场 vs 非机场
-# =========================
-print("\n" + "=" * 60)
-print("9. Plotting: airport vs non-airport")
-print("=" * 60)
-
+# 图 C：机场 vs 非机场（对应模型中的 is_airport_trip）
+# Figure C: airport vs non-airport (aligned with model feature is_airport_trip).
 airport_avg = (
     df.groupby("is_airport_trip", as_index=False)
       .agg(
@@ -281,9 +284,8 @@ airport_avg = (
           trip_count=("total_amount", "size")
       )
 )
-
+print("\nAirport vs non-airport mean total_amount:")
 print(airport_avg)
-
 airport_avg.to_csv(OUTPUT_DIR / "airport_avg_total_amount.csv", index=False)
 
 plt.figure(figsize=(6, 5))
@@ -297,36 +299,50 @@ plt.close()
 
 
 # =========================
-# 10. 图 7：工作日 vs 周末
+# 4.5 EDA 主线定义（用于后续假设检验与建模叙事）
+# 4.5 Define EDA storyline links for downstream hypothesis/model narrative
 # =========================
-print("\n" + "=" * 60)
-print("10. Plotting: weekday vs weekend")
-print("=" * 60)
-
-weekend_avg = (
-    df.groupby("is_weekend", as_index=False)
-      .agg(
-          mean_total_amount=("total_amount", "mean"),
-          trip_count=("total_amount", "size")
-      )
+TOP_HOUR_COUNT = 3
+top_fare_hour_df = (
+    hour_avg.sort_values("total_amount", ascending=False)
+    .head(TOP_HOUR_COUNT)
+    .copy()
 )
+top_fare_hours = top_fare_hour_df["pickup_hour"].astype(int).tolist()
+df["is_top_fare_hour"] = df["pickup_hour"].isin(top_fare_hours)
 
-print(weekend_avg)
+print("\nTop fare hours derived from EDA fig_4:", top_fare_hours)
+top_fare_hour_df.to_csv(OUTPUT_DIR / "top_fare_hours_from_eda.csv", index=False)
 
-weekend_avg.to_csv(OUTPUT_DIR / "weekend_avg_total_amount.csv", index=False)
-
-plt.figure(figsize=(6, 5))
-plt.bar(weekend_avg["is_weekend"].astype(str), weekend_avg["mean_total_amount"])
-plt.xlabel("is_weekend")
-plt.ylabel("mean total_amount")
-plt.title("Average total_amount: weekday vs weekend")
-plt.tight_layout()
-plt.savefig(OUTPUT_DIR / "fig_7_weekday_vs_weekend.png", dpi=180)
-plt.close()
+lineage_df = pd.DataFrame([
+    {
+        "eda_figure": "fig_2_distance_vs_total_amount.png",
+        "eda_key_variable": "trip_distance",
+        "linked_model_feature": "trip_distance",
+        "linked_hypothesis_test": "used as supporting covariate in both hypothesis narratives",
+        "purpose": "fare level grows with distance, supports distance as core predictor"
+    },
+    {
+        "eda_figure": "fig_4_hourly_avg_total_amount.png",
+        "eda_key_variable": "pickup_hour",
+        "linked_model_feature": "pickup_hour",
+        "linked_hypothesis_test": "top_fare_hours_vs_other_hours",
+        "purpose": "hourly fare pattern motivates explicit time effect testing"
+    },
+    {
+        "eda_figure": "fig_6_airport_vs_nonairport.png",
+        "eda_key_variable": "is_airport_trip",
+        "linked_model_feature": "is_airport_trip",
+        "linked_hypothesis_test": "airport_vs_nonairport",
+        "purpose": "airport premium pattern motivates a direct hypothesis test"
+    },
+])
+lineage_df.to_csv(OUTPUT_DIR / "eda_model_hypothesis_lineage.csv", index=False)
 
 
 # =========================
 # 11. 相关系数分析
+# 11. Correlation analysis
 # =========================
 print("\n" + "=" * 60)
 print("11. Correlation analysis")
@@ -350,6 +366,7 @@ corr_matrix.to_csv(OUTPUT_DIR / "correlation_matrix.csv")
 
 # =========================
 # 12. 假设检验 1：机场 vs 非机场
+# 12. Hypothesis test 1: airport vs non-airport
 # =========================
 print("\n" + "=" * 60)
 print("12. Permutation test: airport vs non-airport")
@@ -380,42 +397,76 @@ print("Permutation p-value:", p_value_airport)
 
 
 # =========================
-# 13. 假设检验 2：周末 vs 工作日
+# 13. 假设检验 2：EDA 高价小时段 vs 其他小时段
+# 13. Hypothesis test 2: top fare hours from EDA vs other hours
 # =========================
 print("\n" + "=" * 60)
-print("13. Permutation test: weekend vs weekday")
+print("13. Permutation test: top fare hours vs other hours")
 print("=" * 60)
 
-observed_diff_weekend = (
-    df[df["is_weekend"] == True]["total_amount"].mean()
-    - df[df["is_weekend"] == False]["total_amount"].mean()
+observed_diff_top_hours = (
+    df[df["is_top_fare_hour"] == True]["total_amount"].mean()
+    - df[df["is_top_fare_hour"] == False]["total_amount"].mean()
 )
 
 count = 0
-labels = df["is_weekend"].to_numpy()
+labels = df["is_top_fare_hour"].to_numpy()
 
 for _ in range(n_perm):
     shuffled = rng.permutation(labels)
     diff = values[shuffled == True].mean() - values[shuffled == False].mean()
-    if abs(diff) >= abs(observed_diff_weekend):
+    if abs(diff) >= abs(observed_diff_top_hours):
         count += 1
 
-p_value_weekend = (count + 1) / (n_perm + 1)
+p_value_top_hours = (count + 1) / (n_perm + 1)
 
-print("Observed difference:", observed_diff_weekend)
-print("Permutation p-value:", p_value_weekend)
+print("Top fare hours (from fig_4):", top_fare_hours)
+print("Observed difference:", observed_diff_top_hours)
+print("Permutation p-value:", p_value_top_hours)
 
 # 保存 hypothesis test 结果
-hypothesis_df = pd.DataFrame({
-    "test": ["airport_vs_nonairport", "weekend_vs_weekday"],
-    "observed_difference": [observed_diff_airport, observed_diff_weekend],
-    "p_value": [p_value_airport, p_value_weekend]
-})
+# Save hypothesis test results.
+airport_true_mask = df["is_airport_trip"] == True
+airport_false_mask = df["is_airport_trip"] == False
+top_hour_true_mask = df["is_top_fare_hour"] == True
+top_hour_false_mask = df["is_top_fare_hour"] == False
+
+hypothesis_df = pd.DataFrame([
+    {
+        "test": "airport_vs_nonairport",
+        "null_hypothesis": "mean(total_amount | airport) = mean(total_amount | non-airport)",
+        "alternative_hypothesis": "mean(total_amount | airport) != mean(total_amount | non-airport)",
+        "group_a_label": "airport",
+        "group_b_label": "non_airport",
+        "group_a_n": int(airport_true_mask.sum()),
+        "group_b_n": int(airport_false_mask.sum()),
+        "group_a_mean": float(df.loc[airport_true_mask, "total_amount"].mean()),
+        "group_b_mean": float(df.loc[airport_false_mask, "total_amount"].mean()),
+        "observed_difference_a_minus_b": observed_diff_airport,
+        "p_value": p_value_airport,
+        "n_perm": n_perm,
+    },
+    {
+        "test": "top_fare_hours_vs_other_hours",
+        "null_hypothesis": "mean(total_amount | top fare hours) = mean(total_amount | other hours)",
+        "alternative_hypothesis": "mean(total_amount | top fare hours) != mean(total_amount | other hours)",
+        "group_a_label": "top_fare_hours",
+        "group_b_label": "other_hours",
+        "group_a_n": int(top_hour_true_mask.sum()),
+        "group_b_n": int(top_hour_false_mask.sum()),
+        "group_a_mean": float(df.loc[top_hour_true_mask, "total_amount"].mean()),
+        "group_b_mean": float(df.loc[top_hour_false_mask, "total_amount"].mean()),
+        "observed_difference_a_minus_b": observed_diff_top_hours,
+        "p_value": p_value_top_hours,
+        "n_perm": n_perm,
+    },
+])
 hypothesis_df.to_csv(OUTPUT_DIR / "hypothesis_test_results.csv", index=False)
 
 
 # =========================
 # 14. 读取模型结果（模型训练已拆分到独立脚本）
+# 14. Load model outputs (training has been split into a separate script)
 # =========================
 print("\n" + "=" * 60)
 print("14. Load modeling outputs from separate script")
@@ -444,6 +495,7 @@ if model_bootstrap_path.exists():
 
 # =========================
 # 14.5 Bootstrap：差值区间 + 指标区间
+# 14.5 Bootstrap: difference intervals + metric intervals
 # =========================
 print("\n" + "=" * 60)
 print("14.5 Bootstrapping for uncertainty intervals")
@@ -452,6 +504,7 @@ print("=" * 60)
 N_BOOT_DIFF = 3000
 
 # 对假设检验中的均值差做 bootstrap CI
+# Compute bootstrap CIs for mean differences in the hypothesis tests.
 airport_true_vals = df.loc[df["is_airport_trip"] == True, "total_amount"].to_numpy()
 airport_false_vals = df.loc[df["is_airport_trip"] == False, "total_amount"].to_numpy()
 airport_ci = bootstrap_mean_diff_ci(
@@ -461,11 +514,11 @@ airport_ci = bootstrap_mean_diff_ci(
     random_state=42
 )
 
-weekend_true_vals = df.loc[df["is_weekend"] == True, "total_amount"].to_numpy()
-weekend_false_vals = df.loc[df["is_weekend"] == False, "total_amount"].to_numpy()
-weekend_ci = bootstrap_mean_diff_ci(
-    weekend_true_vals,
-    weekend_false_vals,
+top_hour_true_vals = df.loc[df["is_top_fare_hour"] == True, "total_amount"].to_numpy()
+top_hour_false_vals = df.loc[df["is_top_fare_hour"] == False, "total_amount"].to_numpy()
+top_hour_ci = bootstrap_mean_diff_ci(
+    top_hour_true_vals,
+    top_hour_false_vals,
     n_boot=N_BOOT_DIFF,
     random_state=42
 )
@@ -473,6 +526,8 @@ weekend_ci = bootstrap_mean_diff_ci(
 bootstrap_hypothesis_df = pd.DataFrame([
     {
         "test": "airport_vs_nonairport",
+        "group_a_label": "airport",
+        "group_b_label": "non_airport",
         "observed_difference": observed_diff_airport,
         "bootstrap_mean": airport_ci["bootstrap_mean"],
         "bootstrap_std": airport_ci["bootstrap_std"],
@@ -481,12 +536,14 @@ bootstrap_hypothesis_df = pd.DataFrame([
         "n_boot": N_BOOT_DIFF,
     },
     {
-        "test": "weekend_vs_weekday",
-        "observed_difference": observed_diff_weekend,
-        "bootstrap_mean": weekend_ci["bootstrap_mean"],
-        "bootstrap_std": weekend_ci["bootstrap_std"],
-        "ci_lower_95": weekend_ci["ci_lower_95"],
-        "ci_upper_95": weekend_ci["ci_upper_95"],
+        "test": "top_fare_hours_vs_other_hours",
+        "group_a_label": "top_fare_hours",
+        "group_b_label": "other_hours",
+        "observed_difference": observed_diff_top_hours,
+        "bootstrap_mean": top_hour_ci["bootstrap_mean"],
+        "bootstrap_std": top_hour_ci["bootstrap_std"],
+        "ci_lower_95": top_hour_ci["ci_lower_95"],
+        "ci_upper_95": top_hour_ci["ci_upper_95"],
         "n_boot": N_BOOT_DIFF,
     },
 ])
@@ -496,6 +553,7 @@ print("\nBootstrap CI for hypothesis differences:")
 print(bootstrap_hypothesis_df)
 
 # 模型指标的 bootstrap 区间改由独立脚本输出，这里只读取
+# Bootstrap intervals for model metrics are produced by the separate script; only load them here.
 bootstrap_metric_path = OUTPUT_DIR / "bootstrap_model_metric_ci.csv"
 if bootstrap_metric_path.exists():
     bootstrap_metric_df = pd.read_csv(bootstrap_metric_path)
@@ -506,6 +564,7 @@ else:
     print("Please run `python proposal_model_training.py` first.")
 
 # 画图：假设差值点估计 + bootstrap 95% CI
+# Plot: hypothesis difference point estimates + bootstrap 95% CIs.
 plt.figure(figsize=(7, 4))
 x_labels = bootstrap_hypothesis_df["test"].tolist()
 x = np.arange(len(x_labels))
@@ -531,352 +590,11 @@ plt.close()
 
 
 # =========================
-# 15. 成本效率分析：单位里程成本与速度
+# 15. 最终总结输出
+# 15. Final summary output
 # =========================
 print("\n" + "=" * 60)
-print("15. Cost efficiency analysis")
-print("=" * 60)
-
-# 计算基础效率指标，避免除以 0 的问题
-eps = 1e-6
-df["amount_per_mile"] = df["total_amount"] / (df["trip_distance"] + eps)
-df["amount_per_minute"] = df["total_amount"] / (df["trip_duration_minutes"] + eps)
-df["speed_mph"] = df["trip_distance"] / (df["trip_duration_minutes"] / 60 + eps)
-df["minutes_per_mile"] = df["trip_duration_minutes"] / (df["trip_distance"] + eps)
-
-# 对比例类指标做轻微截尾，减少极端值影响
-for col in ["amount_per_mile", "amount_per_minute", "speed_mph", "minutes_per_mile"]:
-    q01, q99 = df[col].quantile([0.01, 0.99])
-    df[f"{col}_clip"] = df[col].clip(lower=q01, upper=q99)
-
-# 按小时汇总均值和样本量
-hour_efficiency = (
-    df.groupby("pickup_hour", as_index=False)
-      .agg(
-          mean_total_amount=("total_amount", "mean"),
-          mean_amount_per_mile=("amount_per_mile_clip", "mean"),
-          mean_speed_mph=("speed_mph_clip", "mean"),
-          mean_minutes_per_mile=("minutes_per_mile_clip", "mean"),
-          trip_count=("total_amount", "size")
-      )
-      .sort_values("pickup_hour")
-)
-
-print(hour_efficiency)
-hour_efficiency.to_csv(OUTPUT_DIR / "hour_efficiency_summary.csv", index=False)
-
-# 画图：小时维度下单位里程成本与速度
-plt.figure(figsize=(9, 5))
-plt.plot(hour_efficiency["pickup_hour"], hour_efficiency["mean_amount_per_mile"], marker="o", label="mean amount per mile")
-plt.plot(hour_efficiency["pickup_hour"], hour_efficiency["mean_speed_mph"], marker="s", label="mean speed (mph)")
-plt.xlabel("pickup_hour")
-plt.ylabel("value")
-plt.title("Hourly cost efficiency: amount_per_mile vs speed_mph")
-plt.xticks(range(0, 24))
-plt.legend()
-plt.tight_layout()
-plt.savefig(OUTPUT_DIR / "fig_8_hourly_cost_efficiency.png", dpi=180)
-plt.close()
-
-
-# =========================
-# 16. 机场溢价拆解：控制变量 + 距离分段
-# =========================
-print("\n" + "=" * 60)
-print("16. Airport premium decomposition")
-print("=" * 60)
-
-# 距离分段后比较机场与非机场均价
-df["distance_band"] = pd.cut(
-    df["trip_distance"],
-    bins=[0, 2, 5, 10, 20, 80],
-    labels=["0-2", "2-5", "5-10", "10-20", "20+"],
-    include_lowest=True
-)
-
-airport_by_dist = (
-    df.groupby(["distance_band", "is_airport_trip"], as_index=False, observed=False)
-      .agg(
-          mean_total_amount=("total_amount", "mean"),
-          trip_count=("total_amount", "size")
-      )
-)
-
-print(airport_by_dist)
-airport_by_dist.to_csv(OUTPUT_DIR / "airport_by_distance_band.csv", index=False)
-
-# 构造控制变量线性回归，估计机场额外溢价
-control_features = [
-    "trip_distance",
-    "trip_duration_minutes",
-    "pickup_month",
-    "pickup_hour",
-    "pickup_weekday",
-    "passenger_count",
-    "is_airport_trip",
-    "payment_type",
-    "pickup_borough",
-    "dropoff_borough"
-]
-
-control_numeric_features = [
-    "trip_distance",
-    "trip_duration_minutes",
-    "pickup_month",
-    "pickup_hour",
-    "pickup_weekday",
-    "passenger_count"
-]
-
-control_categorical_features = [
-    "is_airport_trip",
-    "payment_type",
-    "pickup_borough",
-    "dropoff_borough"
-]
-
-control_numeric_transformer = Pipeline(steps=[
-    ("imputer", SimpleImputer(strategy="median"))
-])
-
-control_categorical_transformer = Pipeline(steps=[
-    ("imputer", SimpleImputer(strategy="most_frequent")),
-    ("onehot", OneHotEncoder(drop="first", handle_unknown="ignore"))
-])
-
-control_preprocessor = ColumnTransformer(
-    transformers=[
-        ("num", control_numeric_transformer, control_numeric_features),
-        ("cat", control_categorical_transformer, control_categorical_features)
-    ]
-)
-
-control_model = Pipeline(steps=[
-    ("preprocessor", control_preprocessor),
-    ("model", LinearRegression())
-])
-
-control_model.fit(df[control_features], df["total_amount"])
-
-# 提取机场变量的系数
-ohe = (
-    control_model.named_steps["preprocessor"]
-                .named_transformers_["cat"]
-                .named_steps["onehot"]
-)
-cat_feature_names = ohe.get_feature_names_out(control_categorical_features)
-all_feature_names = control_numeric_features + list(cat_feature_names)
-coef_series = pd.Series(control_model.named_steps["model"].coef_, index=all_feature_names)
-airport_controlled_coef = float(coef_series.get("is_airport_trip_True", np.nan))
-
-airport_controlled_df = pd.DataFrame({
-    "metric": ["airport_premium_controlled"],
-    "value": [airport_controlled_coef]
-})
-airport_controlled_df.to_csv(OUTPUT_DIR / "airport_controlled_effect.csv", index=False)
-
-print("Controlled airport premium (coef):", round(airport_controlled_coef, 4))
-
-# =========================
-# 16.5 Bootstrap：控制后机场溢价区间
-# =========================
-N_BOOT_CONTROL = 400
-airport_feature_name = "is_airport_trip_True"
-
-if airport_feature_name in all_feature_names:
-    X_control_matrix = control_model.named_steps["preprocessor"].transform(df[control_features])
-    y_control = df["total_amount"].to_numpy()
-    airport_idx = all_feature_names.index(airport_feature_name)
-
-    rng_control = np.random.default_rng(42)
-    n_control = len(y_control)
-    boot_coef = np.empty(N_BOOT_CONTROL)
-
-    for i in range(N_BOOT_CONTROL):
-        idx = rng_control.integers(0, n_control, n_control)
-        lr = LinearRegression()
-        lr.fit(X_control_matrix[idx], y_control[idx])
-        boot_coef[i] = lr.coef_[airport_idx]
-
-    bootstrap_control_df = pd.DataFrame([{
-        "metric": "airport_premium_controlled_bootstrap",
-        "point_estimate": float(airport_controlled_coef),
-        "bootstrap_mean": float(boot_coef.mean()),
-        "bootstrap_std": float(boot_coef.std(ddof=1)),
-        "ci_lower_95": float(np.quantile(boot_coef, 0.025)),
-        "ci_upper_95": float(np.quantile(boot_coef, 0.975)),
-        "n_boot": N_BOOT_CONTROL,
-    }])
-
-    bootstrap_control_df.to_csv(OUTPUT_DIR / "bootstrap_controlled_airport_ci.csv", index=False)
-    print("\nBootstrap CI for controlled airport premium:")
-    print(bootstrap_control_df)
-else:
-    print("\nWarning: is_airport_trip_True not found, skip controlled bootstrap.")
-
-# 画图：距离分段后机场与非机场均价对比
-pivot_airport = airport_by_dist.pivot(
-    index="distance_band",
-    columns="is_airport_trip",
-    values="mean_total_amount"
-).reset_index()
-pivot_airport.columns = ["distance_band", "non_airport_mean", "airport_mean"]
-
-plt.figure(figsize=(8, 5))
-x = np.arange(len(pivot_airport))
-width = 0.35
-plt.bar(x - width / 2, pivot_airport["non_airport_mean"], width=width, label="non-airport")
-plt.bar(x + width / 2, pivot_airport["airport_mean"], width=width, label="airport")
-plt.xticks(x, pivot_airport["distance_band"].astype(str))
-plt.xlabel("distance_band (mile)")
-plt.ylabel("mean total_amount")
-plt.title("Airport vs non-airport by distance band")
-plt.legend()
-plt.tight_layout()
-plt.savefig(OUTPUT_DIR / "fig_9_airport_gap_by_distance_band.png", dpi=180)
-plt.close()
-
-
-# =========================
-# 17. 风险定价分析：按小时看分位数
-# =========================
-print("\n" + "=" * 60)
-print("17. Risk-based pricing analysis")
-print("=" * 60)
-
-# 使用 p50/p90/p95 刻画不同小时的价格风险带
-hourly_risk = (
-    df.groupby("pickup_hour", as_index=False)
-      .agg(
-          p50_total_amount=("total_amount", lambda x: x.quantile(0.50)),
-          p90_total_amount=("total_amount", lambda x: x.quantile(0.90)),
-          p95_total_amount=("total_amount", lambda x: x.quantile(0.95)),
-          trip_count=("total_amount", "size")
-      )
-      .sort_values("pickup_hour")
-)
-
-print(hourly_risk)
-hourly_risk.to_csv(OUTPUT_DIR / "hourly_risk_quantiles.csv", index=False)
-
-# 画图：不同小时的中位数和高分位价格
-plt.figure(figsize=(8, 5))
-plt.plot(hourly_risk["pickup_hour"], hourly_risk["p50_total_amount"], marker="o", label="p50")
-plt.plot(hourly_risk["pickup_hour"], hourly_risk["p90_total_amount"], marker="s", label="p90")
-plt.plot(hourly_risk["pickup_hour"], hourly_risk["p95_total_amount"], marker="^", label="p95")
-plt.xlabel("pickup_hour")
-plt.ylabel("total_amount")
-plt.title("Hourly price risk profile (p50/p90/p95)")
-plt.xticks(range(0, 24))
-plt.legend()
-plt.tight_layout()
-plt.savefig(OUTPUT_DIR / "fig_10_hourly_price_risk_quantiles.png", dpi=180)
-plt.close()
-
-
-# =========================
-# 18. 路线结构分析：上车区-下车区组合
-# =========================
-print("\n" + "=" * 60)
-print("18. Route structure analysis")
-print("=" * 60)
-
-# 统计路线层面的价格、距离、时长与效率
-route_summary = (
-    df.groupby(["pickup_borough", "dropoff_borough"], as_index=False)
-      .agg(
-          trip_count=("total_amount", "size"),
-          mean_total_amount=("total_amount", "mean"),
-          mean_trip_distance=("trip_distance", "mean"),
-          mean_trip_duration=("trip_duration_minutes", "mean"),
-          mean_amount_per_mile=("amount_per_mile_clip", "mean"),
-          mean_minutes_per_mile=("minutes_per_mile_clip", "mean")
-      )
-)
-
-# 过滤小样本路线，避免均值被极端值主导
-route_summary_filtered = route_summary[route_summary["trip_count"] >= 300].copy()
-route_summary_filtered = route_summary_filtered.sort_values("mean_total_amount", ascending=False)
-
-print(route_summary_filtered.head(20))
-route_summary_filtered.to_csv(OUTPUT_DIR / "route_structure_summary.csv", index=False)
-
-# 画图：样本量足够的路线里，均价最高的前 10 条
-top_routes = route_summary_filtered.head(10).copy()
-top_routes["route"] = top_routes["pickup_borough"].astype(str) + " -> " + top_routes["dropoff_borough"].astype(str)
-top_routes = top_routes.sort_values("mean_total_amount", ascending=True)
-
-plt.figure(figsize=(9, 6))
-plt.barh(top_routes["route"], top_routes["mean_total_amount"])
-plt.xlabel("mean total_amount")
-plt.ylabel("route")
-plt.title("Top routes by mean total_amount (n >= 300)")
-plt.tight_layout()
-plt.savefig(OUTPUT_DIR / "fig_11_top_routes_mean_total_amount.png", dpi=180)
-plt.close()
-
-
-# =========================
-# 19. 季节性拆解：月份、周末差异与结构变化
-# =========================
-print("\n" + "=" * 60)
-print("19. Seasonality decomposition")
-print("=" * 60)
-
-# 按月份看均价、距离、时长和单位里程价格
-monthly_decomp = (
-    df.groupby("pickup_month", as_index=False)
-      .agg(
-          mean_total_amount=("total_amount", "mean"),
-          mean_trip_distance=("trip_distance", "mean"),
-          mean_trip_duration=("trip_duration_minutes", "mean"),
-          mean_amount_per_mile=("amount_per_mile_clip", "mean"),
-          trip_count=("total_amount", "size")
-      )
-      .sort_values("pickup_month")
-)
-
-print(monthly_decomp)
-monthly_decomp.to_csv(OUTPUT_DIR / "monthly_decomposition.csv", index=False)
-
-# 计算每个月“周末 - 工作日”均价差
-monthly_weekend = (
-    df.groupby(["pickup_month", "is_weekend"], as_index=False)
-      .agg(mean_total_amount=("total_amount", "mean"))
-)
-
-monthly_weekend_pivot = monthly_weekend.pivot(
-    index="pickup_month",
-    columns="is_weekend",
-    values="mean_total_amount"
-).reset_index()
-monthly_weekend_pivot.columns = ["pickup_month", "weekday_mean", "weekend_mean"]
-monthly_weekend_pivot["weekend_minus_weekday"] = (
-    monthly_weekend_pivot["weekend_mean"] - monthly_weekend_pivot["weekday_mean"]
-)
-
-print(monthly_weekend_pivot)
-monthly_weekend_pivot.to_csv(OUTPUT_DIR / "monthly_weekend_gap.csv", index=False)
-
-# 画图：月份维度下总价与单位里程成本
-plt.figure(figsize=(8, 5))
-plt.plot(monthly_decomp["pickup_month"], monthly_decomp["mean_total_amount"], marker="o", label="mean total_amount")
-plt.plot(monthly_decomp["pickup_month"], monthly_decomp["mean_amount_per_mile"], marker="s", label="mean amount_per_mile")
-plt.xlabel("pickup_month")
-plt.ylabel("value")
-plt.title("Monthly decomposition: total_amount vs amount_per_mile")
-plt.xticks(range(1, 13))
-plt.legend()
-plt.tight_layout()
-plt.savefig(OUTPUT_DIR / "fig_12_monthly_decomposition.png", dpi=180)
-plt.close()
-
-
-# =========================
-# 20. 最终总结输出
-# =========================
-print("\n" + "=" * 60)
-print("20. Finished")
+print("15. Finished")
 print("=" * 60)
 
 print("All outputs have been saved to:")
